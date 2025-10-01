@@ -159,6 +159,14 @@ class TelegramAPI {
   async sendHelp(chatId, text) {
     return this.sendMessage(chatId, { text, disablePreview: true, parse_mode: 'Markdown' }); // 修正：强制Markdown
   }
+
+  // 补充 getChat、createChatInviteLink 方法用于频道来源URL补全
+  async getChat(chatId) {
+    return this.request('getChat', { chat_id: chatId });
+  }
+  async createChatInviteLink(chatId) {
+    return this.request('createChatInviteLink', { chat_id: chatId });
+  }
 }
 
 // ==================== 工具函数模块 ====================
@@ -171,7 +179,9 @@ const Utils = {
   // 消息类型判断
   isMediaMessage: message => message.photo || message.video || message.document || message.audio || message.voice || message.video_note || message.sticker || message.animation,
   isMediaGroupMessage: message => message.media_group_id !== undefined,
-  isForwardedMessage: message => message.forward_origin !== undefined,
+  // 修正：支持所有转发字段
+  isForwardedMessage: message =>
+    !!(message.forward_origin || message.forward_from_chat || message.forward_from),
   isCommandMessage: message => (message.text || message.caption || '').startsWith(`/${BOT_COMMAND}`),
   isSystemMessage: message => (
     message.chat_shared ||
@@ -219,18 +229,32 @@ const Utils = {
     return links.map(link => link.text).join(` ${separator} `);
   },
 
-  // 获取转发来源信息（完整保留）
-  getForwardSource: async function(forwardOrigin, api = null) {
+  // 获取转发来源信息（修复频道识别 & 兼容 forward_from_chat）
+  getForwardSource: async function(forwardOrigin, api = null, message = null) {
+    // 自动兼容所有转发来源结构
+    if (!forwardOrigin && message) {
+      if (message.forward_from_chat) {
+        forwardOrigin = {
+          type: 'channel',
+          chat: message.forward_from_chat,
+          message_id: message.forward_from_message_id
+        };
+      } else if (message.forward_from) {
+        forwardOrigin = {
+          type: 'user',
+          sender_user: message.forward_from
+        };
+      }
+    }
     if (!forwardOrigin) return null;
-    
+
     const { type } = forwardOrigin;
     const getSource = {
       channel: async () => {
         const chat = forwardOrigin.chat;
         let url = null;
-        
         if (chat?.username) {
-          url = `https://t.me/${chat.username}/${forwardOrigin.message_id}`;
+          url = `https://t.me/${chat.username}/${forwardOrigin.message_id || ''}`;
         } else if (api && chat?.id) {
           try {
             const chatInfo = await api.getChat(chat.id);
@@ -241,30 +265,27 @@ const Utils = {
               if (inviteResult?.ok) url = inviteResult.result.invite_link;
             }
           } catch (error) {
-            console.warn('获取聊天信息失败，使用ID格式链接:', error);
-            url = `https://t.me/c/${Math.abs(chat.id)}/${forwardOrigin.message_id}`;
+            url = `https://t.me/c/${Math.abs(chat.id)}/${forwardOrigin.message_id || ''}`;
           }
         } else if (chat?.id) {
-          url = `https://t.me/c/${Math.abs(chat.id)}/${forwardOrigin.message_id}`;
+          url = `https://t.me/c/${Math.abs(chat.id)}/${forwardOrigin.message_id || ''}`;
         }
-        
         return {
           type: 'channel',
-          name: chat?.title || '未知频道',
+          name: chat?.title || chat?.username || '未知频道',
           username: chat?.username,
-          url: url,
+          url,
           messageId: forwardOrigin.message_id
         };
       },
       user: () => {
         const user = forwardOrigin.sender_user;
         const url = user?.username ? `https://t.me/${user.username}` : null;
-        
         return {
           type: 'user',
           name: `${user?.first_name || ''} ${user?.last_name || ''}`.trim() || '未知用户',
           username: user?.username,
-          url: url,
+          url,
           isBot: user?.is_bot || false
         };
       },
@@ -278,7 +299,6 @@ const Utils = {
       chat: async () => {
         const chat = forwardOrigin.sender_chat;
         let url = null;
-        
         if (chat?.username) {
           url = `https://t.me/${chat.username}`;
         } else if (api && chat?.id) {
@@ -291,29 +311,25 @@ const Utils = {
               if (inviteResult?.ok) url = inviteResult.result.invite_link;
             }
           } catch (error) {
-            console.warn('获取群组信息失败:', error);
             url = `https://t.me/c/${Math.abs(chat.id)}`;
           }
         } else if (chat?.id) {
           url = `https://t.me/c/${Math.abs(chat.id)}`;
         }
-        
         return {
           type: 'chat',
           name: chat?.title || '未知群组',
           username: chat?.username,
-          url: url,
+          url,
           isBot: false
         };
       }
     };
-    
+
     const sourceGetter = getSource[type];
     if (!sourceGetter) return null;
-    
     const source = await sourceGetter();
     if (!source) return null;
-    
     if (source.isBot) source.name = `${source.name} 🤖`;
     return source;
   },
@@ -537,66 +553,74 @@ class MessageProcessor {
     return { text: newChars.join(''), entities: newEntities };
   }
 
-  // 构建完整消息文本
+  // 构建完整消息文本（修复newline模式顺序：消息\n\n来源\n\n页脚）
   buildFullText(text, config, forwardSource = null) {
-    let fullText = text || '';
+    let parts = [];
+    if (text) parts.push(text);
 
-    // newline模式：来源显示在消息上方
-    if (forwardSource && config.forwardOptimization && config.forwardPosition === 'newline') {
-      const viaText = config.viaWord + forwardSource.name;
-      fullText = `${viaText}\n\n${fullText}`;
+    // 来源 newline 模式
+    if (
+      forwardSource &&
+      config.forwardOptimization &&
+      config.forwardPosition === 'newline'
+    ) {
+      const viaText = (config.viaWord || 'via ') + forwardSource.name;
+      if (viaText && forwardSource.name) parts.push(viaText);
     }
 
-    // 页脚始终显示在消息下方
+    // 页脚
+    let footerText = '';
     if (config.footer.enabled && config.footer.links?.length) {
-      const footerText = Utils.generatePlainTextLinks(config.footer.links, config.separator || '|');
-      if (footerText) fullText += `\n\n${footerText}`;
+      footerText = Utils.generatePlainTextLinks(config.footer.links, config.separator || '|');
+      if (footerText) parts.push(footerText);
     }
 
-    // inline模式：来源显示在消息末尾
-    if (forwardSource && config.forwardOptimization && config.forwardPosition === 'inline') {
-      const viaText = config.viaWord + forwardSource.name;
-      if (config.footer.enabled && config.footer.links?.length) {
-        fullText += ` ${config.separator || '|'} ${viaText}`;
-      } else {
-        fullText += `\n\n${viaText}`;
-      }
-    }
-
-    return fullText;
+    return parts.join('\n\n');
   }
 
-  // 页脚与来源的实体构建（完整保留）
+  // 页脚与来源的实体构建（修正newline模式实体偏移）
   buildEntities(baseText, baseEntities = [], config, forwardSource = null) {
     let entities = [...(baseEntities || [])];
     let offset = Utils.textLength(baseText);
 
-    // 处理newline模式下的来源实体
-    if (forwardSource && config.forwardOptimization && config.forwardPosition === 'newline') {
+    // 来源 newline模式
+    let sourceOffset = offset;
+    if (
+      forwardSource &&
+      config.forwardOptimization &&
+      config.forwardPosition === 'newline'
+    ) {
       const viaWord = config.viaWord || 'via ';
       const viaText = viaWord + forwardSource.name;
-      const viaLen = Utils.textLength(viaWord);
-      const sourceNameLen = Utils.textLength(forwardSource.name);
-      
-      if (forwardSource.url) {
-        entities.push({
-          type: 'text_link',
-          offset: viaLen,
-          length: sourceNameLen,
-          url: forwardSource.url
-        });
+      if (viaText && forwardSource.name) {
+        sourceOffset = offset + 2;
+        if (forwardSource.url) {
+          entities.push({
+            type: 'text_link',
+            offset: sourceOffset + Utils.textLength(viaWord),
+            length: Utils.textLength(forwardSource.name),
+            url: forwardSource.url
+          });
+        }
+        offset = sourceOffset + Utils.textLength(viaText);
       }
-      offset += viaLen + sourceNameLen + 2;
     }
 
-    // 处理页脚实体
+    // 页脚实体
     if (config.footer.enabled && config.footer.links?.length) {
-      offset += 2;
-      
-      let currentFooterOffset = offset;
+      let footerOffset = offset;
+      if (
+        forwardSource &&
+        config.forwardOptimization &&
+        config.forwardPosition === 'newline'
+      ) {
+        footerOffset = sourceOffset + Utils.textLength((config.viaWord || 'via ') + forwardSource.name) + 2;
+      } else {
+        footerOffset += 2;
+      }
+      let currentFooterOffset = footerOffset;
       config.footer.links.forEach((link, index) => {
         if (index > 0) currentFooterOffset += Utils.textLength(` ${config.separator || '|'} `);
-        
         if (link.url) {
           entities.push({
             type: 'text_link',
@@ -607,20 +631,20 @@ class MessageProcessor {
         }
         currentFooterOffset += Utils.textLength(link.text);
       });
-      
-      offset = currentFooterOffset;
     }
 
-    // 处理inline模式下的来源实体
-    if (forwardSource && config.forwardOptimization && config.forwardPosition === 'inline') {
+    // inline模式原逻辑不变
+    if (
+      forwardSource &&
+      config.forwardOptimization &&
+      config.forwardPosition === 'inline'
+    ) {
       const viaWord = config.viaWord || 'via ';
       const viaLen = Utils.textLength(viaWord);
       const sourceNameLen = Utils.textLength(forwardSource.name);
-      
       if (config.footer.enabled && config.footer.links?.length) {
         const separatorLen = Utils.textLength(` ${config.separator || '|'} `);
         offset += separatorLen;
-        
         if (forwardSource.url) {
           entities.push({
             type: 'text_link',
@@ -646,7 +670,7 @@ class MessageProcessor {
 
     return entities;
   }
-}
+};
 
 // ==================== 命令处理器模块 ====================
 class CommandHandler {
@@ -882,6 +906,7 @@ class BotHandler {
     }
     // 处理转发消息
     if (config.forwardOptimization && Utils.isForwardedMessage(message)) {
+      // 修复转发来源识别，传递 message 以支持兼容结构
       return await this._handleForwardedMessage(chatId, message, config);
     }
     // 处理普通消息
@@ -894,7 +919,8 @@ class BotHandler {
       return;
     }
     const entities = message.entities || message.caption_entities || [];
-    const forwardSource = await Utils.getForwardSource(message.forward_origin, this.api);
+    // 修复转发来源识别（传递 message）
+    const forwardSource = await Utils.getForwardSource(message.forward_origin, this.api, message);
     const { text, entities: processedEntities } = this.processor.processBannedWords(
       message.text || message.caption || '', entities, config.bannedWords
     );
@@ -931,7 +957,8 @@ class BotHandler {
     const messageText = message.text || message.caption || '';
     const entities = message.entities || message.caption_entities || [];
     const hasMedia = Utils.isMediaMessage(message);
-    const forwardSource = await Utils.getForwardSource(message.forward_origin, this.api);
+    // 修复转发来源识别（传递 message）
+    const forwardSource = await Utils.getForwardSource(message.forward_origin, this.api, message);
     const { text, entities: filteredEntities } = this.processor.processBannedWords(
       messageText, entities, config.bannedWords
     );
@@ -973,7 +1000,8 @@ class BotHandler {
     const messageText = originalMessage.text || originalMessage.caption || '';
     const entities = originalMessage.entities || originalMessage.caption_entities || [];
     const hasMedia = Utils.isMediaMessage(originalMessage);
-    const forwardSource = await Utils.getForwardSource(originalMessage.forward_origin, this.api);
+    // 修复转发来源识别（传递 message）
+    const forwardSource = await Utils.getForwardSource(originalMessage.forward_origin, this.api, originalMessage);
     
     // 处理屏蔽词
     const { text, entities: filteredEntities } = this.processor.processBannedWords(
@@ -1004,4 +1032,3 @@ class BotHandler {
     }
   }
 }
-
