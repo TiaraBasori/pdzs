@@ -19,7 +19,7 @@ const HELP_TEXT = `📌 /pdzs footer
 参数：填写Markdown链接文本（如"示例 (https://t.me/example)"）或"none"禁用页脚
 实例：
    - 禁用页脚：/pdzs footer none
-   - 设置页脚：/pdzs footer "\[text1\] (https://t.me/link) \| text2 \| \[text3\] (https://t.me/link)"
+   - 设置页脚：/pdzs footer "\\[text1\\] (https://t.me/link) \\| text2 \\| \\[text3\\] (https://t.me/link)"
 
 📌 /pdzs delword
 功能概括：设置需要自动屏蔽的关键词（支持正则），匹配到的内容会被删除
@@ -27,6 +27,7 @@ const HELP_TEXT = `📌 /pdzs footer
 实例：
    - 屏蔽包含"广告"的词：/pdzs delword "\\b广告\\b"
    - 清除所有屏蔽词：/pdzs delword none
+   - 追加屏蔽词：/pdzs delword add "\\bspam\\b"
 
 📌 /pdzs forward
 功能概括：设置转发消息时的来源显示方式，优化转发内容的可读性
@@ -56,7 +57,7 @@ const HELP_TEXT = `📌 /pdzs footer
    - 设置来源前缀为"来源："：/pdzs viaword 来源：
 
 📌 /pdzs delsys
-功能概括：自动删除频道中的系统消息（如加入成员提示）
+功能概括：自动删除频道中的系统消息（如加入成员提示、置顶提示）
 参数：填写"on"启用系统消息自动删除，或"off"关闭
 实例：
    - 启用系统消息删除：/pdzs delsys on
@@ -78,12 +79,10 @@ const HELP_TEXT = `📌 /pdzs footer
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== 'POST') return new Response('Ciallo～(∠・ω< )⌒☆', { status: 200 });
-    
     try {
       const BOT_TOKEN = env.BOT_TOKEN;
       const pdzsConfig = env.pdzsConfig;
       if (!BOT_TOKEN) return new Response('BOT_TOKEN未配置', { status: 500 });
-      
       const botHandler = new BotHandler(BOT_TOKEN, pdzsConfig);
       const update = await request.json();
       await botHandler.handleUpdate(update);
@@ -109,7 +108,6 @@ class TelegramAPI {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
       });
-      
       if (!res.ok) {
         const errorText = await res.text();
         console.error(`API请求失败 (${endpoint}): ${res.status} - ${errorText}`);
@@ -124,10 +122,9 @@ class TelegramAPI {
 
   async editMessage(chatId, messageId, { text, entities, isMedia, disablePreview = true }) {
     const data = { chat_id: chatId, message_id: messageId, disable_web_page_preview: disablePreview };
-    
     if (isMedia) {
       data.caption = text || '';
-      if (entities?.length) data.caption_entities = entities;
+      if (entities?.length) data.caption_entities = entities; // 修正：媒体消息用caption_entities
       return this.request('editMessageCaption', data);
     } else {
       data.text = text || '';
@@ -138,14 +135,12 @@ class TelegramAPI {
 
   async sendMessage(chatId, { text, entities, media, disablePreview = true }) {
     const data = { chat_id: chatId, disable_web_page_preview: disablePreview };
-    
     if (media) {
       data[media.type] = media.file_id;
       if (text) data.caption = text;
-      if (entities?.length) data.caption_entities = entities;
+      if (entities?.length) data.caption_entities = entities; // 修正：媒体消息用caption_entities
       return this.request(`send${media.type.charAt(0).toUpperCase() + media.type.slice(1)}`, data);
     }
-    
     data.text = text || '';
     if (entities?.length) data.entities = entities;
     return this.request('sendMessage', data);
@@ -157,8 +152,12 @@ class TelegramAPI {
 
   async editCommandResponse(chatId, messageId, text) {
     return this.request('editMessageText', {
-      chat_id: chatId, message_id: messageId, text: text || '', disable_web_page_preview: true
+      chat_id: chatId, message_id: messageId, text: text || '', disable_web_page_preview: true, parse_mode: 'Markdown' // 修正：强制Markdown
     });
+  }
+
+  async sendHelp(chatId, text) {
+    return this.sendMessage(chatId, { text, disablePreview: true, parse_mode: 'Markdown' }); // 修正：强制Markdown
   }
 }
 
@@ -174,7 +173,17 @@ const Utils = {
   isMediaGroupMessage: message => message.media_group_id !== undefined,
   isForwardedMessage: message => message.forward_origin !== undefined,
   isCommandMessage: message => (message.text || message.caption || '').startsWith(`/${BOT_COMMAND}`),
-  isSystemMessage: message => message.chat_shared || message.new_chat_title || message.new_chat_photo || message.delete_chat_photo || message.video_chat_started || message.video_chat_ended || message.video_chat_participants_invited,
+  isSystemMessage: message => (
+    message.chat_shared ||
+    message.new_chat_title ||
+    message.new_chat_photo ||
+    message.delete_chat_photo ||
+    message.video_chat_started ||
+    message.video_chat_ended ||
+    message.left_chat_member ||
+    message.new_chat_members ||
+    message.pinned_message // 修正：判断置顶消息
+  ),
   isReplyToPdzsCommand: message => (message.text || message.caption || '').trim() === `/${BOT_COMMAND}` && message.reply_to_message,
 
   // 实体处理
@@ -185,7 +194,6 @@ const Utils = {
     if (!text) return [];
     const segments = [];
     const lines = text.split('\n');
-    
     for (const line of lines) {
       const parts = line.split(separator).map(part => part.trim());
       for (const part of parts) {
@@ -202,7 +210,7 @@ const Utils = {
     }
     return segments;
   },
-  
+
   generatePlainTextLinks: (links, separator = "|", returnUrls = false) => {
     if (!links || !links.length) return '';
     if (returnUrls) {
@@ -659,12 +667,12 @@ class CommandHandler {
     };
   }
 
+  // 修正命令参数提取方式，只分割一次
   async handleCommand(chatId, messageId, command, args, text) {
     const handler = this.commands[command];
     if (!handler) {
       return await this.api.editCommandResponse(chatId, messageId, `❌未知命令: ${command}`);
     }
-    
     try {
       const response = await handler(chatId, args, text);
       if (response) await this.api.editCommandResponse(chatId, messageId, response);
@@ -681,35 +689,33 @@ class CommandHandler {
       config.footer.links = [];
       return (await this.configManager.setConfig(chatId, config)) ? '✅页脚已禁用' : '❌设置失败';
     }
-
-    const commandLine = text.split('\n').find(l => l.startsWith(`/${BOT_COMMAND} footer`));
-    if (!commandLine) return '❌未找到有效的命令';
-
-    const footerContent = commandLine.replace(`/${BOT_COMMAND} footer`, '').trim();
+    // 只分割一次，取footer内容
+    const match = text.match(/^\/pdzs\s+footer\s+([\s\S]*)$/i);
+    const footerContent = match ? match[1].trim() : '';
     if (!footerContent) return '❌页脚内容不能为空';
-
     const config = await this.configManager.getConfig(chatId);
     const separator = config.separator || '|';
     const links = Utils.parseFooterSegments(footerContent, separator);
     if (!links.length) return '❌未检测到有效的页脚内容';
-
     config.footer = { enabled: true, links, text: `\n\n${Utils.generatePlainTextLinks(links, separator)}` };
     return (await this.configManager.setConfig(chatId, config)) ? '✅页脚设置成功' : '❌设置失败';
   }
 
   async _handleDelword(chatId, args) {
-    if (!args.length) return '❌请提供正则表达式或"none"';
-    
+    if (!args.length) return '❌请提供正则表达式、"none"或"add"';
     const config = await this.configManager.getConfig(chatId);
-    
     if (args[0].toLowerCase() === 'none') {
       config.bannedWords = [];
       return (await this.configManager.setConfig(chatId, config)) ? '✅屏蔽词已清除' : '❌设置失败';
     }
-    
+    if (args[0].toLowerCase() === 'add' && args[1]) {
+      const regex = Utils.parseRegex(args[1]);
+      if (!regex) return '❌正则表达式格式错误';
+      config.bannedWords.push(regex);
+      return (await this.configManager.setConfig(chatId, config)) ? `✅已追加屏蔽词，现有${config.bannedWords.length}条` : '❌设置失败';
+    }
     const regex = Utils.parseRegex(args[0]);
     if (!regex) return '❌正则表达式格式错误';
-    
     config.bannedWords = [regex];
     return (await this.configManager.setConfig(chatId, config)) ? '✅屏蔽词设置成功' : '❌设置失败';
   }
@@ -802,13 +808,8 @@ class BotHandler {
 
   async _handlePrivateMessage(message) {
     const responseText = message.text?.toLowerCase() === '/help' ? HELP_TEXT : '此机器人仅支持在频道中使用，请发送 /help 查看详细说明';
-    
     try {
-      await this.api.sendMessage(message.chat.id, {
-        text: responseText,
-        disablePreview: true,
-        parse_mode: 'Markdown'
-      });
+      await this.api.sendHelp(message.chat.id, responseText); // 修正：强制Markdown
     } catch (error) {
       console.error('回复私聊消息失败:', error);
     }
@@ -816,38 +817,18 @@ class BotHandler {
 
   async _handleChannelPost(message) {
     const chatId = message.chat.id;
-    
-    // 处理优先级：回复命令 > 系统消息删除 > nopdzs标记 > 命令消息 > 普通消息
     if (Utils.isReplyToPdzsCommand(message)) {
       return await this._handlePdzsReply(chatId, message);
     }
-    
     if (await this._handleSystemMessageDeletion(chatId, message)) return;
     if (!Utils.isForwardedMessage(message) && await this._handleNoPdzsTag(chatId, message)) return;
     if (Utils.isCommandMessage(message)) return await this._handleCommandMessage(chatId, message);
-    
     return await this._handleRegularMessage(chatId, message);
-  }
-
-  async _handlePdzsReply(chatId, message) {
-    try {
-      const repliedMessage = message.reply_to_message;
-      if (!repliedMessage) return;
-
-      await this.api.deleteMessage(chatId, message.message_id);
-      const config = await this.configManager.getConfig(chatId);
-      
-      await this._reprocessAndSendMessage(chatId, repliedMessage, config);
-      await this.api.deleteMessage(chatId, repliedMessage.message_id);
-    } catch (error) {
-      console.error('处理 /pdzs 回复失败:', error);
-    }
   }
 
   async _handleSystemMessageDeletion(chatId, message) {
     const config = await this.configManager.getConfig(chatId);
     if (!config.deleteSystemMessages || !Utils.isSystemMessage(message)) return false;
-    
     try {
       await this.api.deleteMessage(chatId, message.message_id);
       return true;
@@ -860,7 +841,6 @@ class BotHandler {
   async _handleNoPdzsTag(chatId, message) {
     const messageText = message.text || message.caption || '';
     if (!Utils.endsWith(messageText, 'nopdzs')) return false;
-    
     try {
       const newText = Utils.removeSuffix(messageText, 'nopdzs');
       await this.api.editMessage(chatId, message.message_id, {
@@ -878,75 +858,65 @@ class BotHandler {
 
   async _handleCommandMessage(chatId, message) {
     const text = message.text || message.caption || '';
-    const parts = text.split(/\s+/);
-    if (parts.length < 2) return;
-    
-    const command = parts[1];
-    const args = parts.slice(2);
+    // 修复命令参数提取方式
+    const match = text.match(/^\/pdzs\s+([^\s]+)\s*([\s\S]*)$/i);
+    if (!match) return;
+    const command = match[1];
+    const argsStr = match[2].trim();
+    // 用空格分割参数，但保留整体字符串
+    const args = argsStr ? argsStr.split(/\s+/) : [];
     await this.commandHandler.handleCommand(chatId, message.message_id, command, args, text);
   }
 
   async _handleRegularMessage(chatId, message) {
     const config = await this.configManager.getConfig(chatId);
-    
     // 跳过转发的媒体组消息
     if (Utils.isMediaGroupMessage(message) && Utils.isForwardedMessage(message)) {
       console.log('检测到转发的媒体组消息，跳过处理');
       return;
     }
-    
-    // 检查是否已经处理过
+    // 优化：用完整页脚判断是否已处理
     const messageText = message.text || message.caption || '';
-    if (config.footer.enabled && config.footer.links?.some(link => messageText.includes(link.text))) {
+    if (config.footer.enabled && config.footer.text && messageText.includes(config.footer.text.trim())) {
       return;
     }
-    
     // 处理转发消息
     if (config.forwardOptimization && Utils.isForwardedMessage(message)) {
       return await this._handleForwardedMessage(chatId, message, config);
     }
-    
     // 处理普通消息
     return await this._processAndEditMessage(chatId, message, config);
   }
 
   async _handleForwardedMessage(chatId, message, config) {
-    // 跳过转发的媒体组消息
     if (Utils.isMediaGroupMessage(message)) {
       console.log('检测到转发的媒体组消息，跳过处理');
       return;
     }
-    
     const entities = message.entities || message.caption_entities || [];
     const forwardSource = await Utils.getForwardSource(message.forward_origin, this.api);
-    
-    // 处理屏蔽词
     const { text, entities: processedEntities } = this.processor.processBannedWords(
       message.text || message.caption || '', entities, config.bannedWords
     );
-    
-    // 构建完整消息
     const fullText = this.processor.buildFullText(text, config, forwardSource);
     const isMedia = Utils.isMediaMessage(message);
     const maxLength = isMedia ? MAX_CAPTION_LENGTH : MAX_TEXT_MESSAGE_LENGTH;
-    
     if (fullText.length > maxLength) {
-      console.warn('消息过长，跳过处理');
+      await this.api.sendMessage(chatId, {
+        text: '❌消息内容过长，无法处理，请简化内容后再试。',
+        disablePreview: true,
+        parse_mode: 'Markdown'
+      }); // 修正：超长消息主动提示
       return;
     }
-    
-    // 构建实体
     const newEntities = this.processor.buildEntities(text, processedEntities, config, forwardSource);
-    
     try {
-      // 发送处理后的消息并删除原消息
       await this.api.sendMessage(chatId, {
         text: fullText,
         entities: newEntities,
         media: Utils.getMediaInfo(message),
         disablePreview: config.disablePreview
       });
-      
       await this.api.deleteMessage(chatId, message.message_id);
     } catch (error) {
       console.error('处理转发消息失败:', error);
@@ -954,36 +924,29 @@ class BotHandler {
   }
 
   async _processAndEditMessage(chatId, message, config) {
-    // 对于媒体组消息，只处理含有标题的那一条
     if (Utils.isMediaGroupMessage(message) && !message.caption && !message.text) {
       console.log('媒体组消息中没有标题，跳过处理');
       return;
     }
-    
     const messageText = message.text || message.caption || '';
     const entities = message.entities || message.caption_entities || [];
     const hasMedia = Utils.isMediaMessage(message);
     const forwardSource = await Utils.getForwardSource(message.forward_origin, this.api);
-    
-    // 处理屏蔽词
     const { text, entities: filteredEntities } = this.processor.processBannedWords(
       messageText, entities, config.bannedWords
     );
-    
-    // 构建完整消息
     const fullText = this.processor.buildFullText(text, config, forwardSource);
     const maxLength = hasMedia ? MAX_CAPTION_LENGTH : MAX_TEXT_MESSAGE_LENGTH;
-    
     if (fullText.length > maxLength) {
-      console.warn('消息过长，跳过处理');
+      await this.api.sendMessage(chatId, {
+        text: '❌消息内容过长，无法处理，请简化内容后再试。',
+        disablePreview: true,
+        parse_mode: 'Markdown'
+      }); // 修正：超长消息主动提示
       return;
     }
-    
-    // 构建实体
     const newEntities = this.processor.buildEntities(text, filteredEntities, config, forwardSource);
-    
     try {
-      // 尝试编辑原消息
       await this.api.editMessage(chatId, message.message_id, {
         text: fullText,
         entities: newEntities,
@@ -992,16 +955,13 @@ class BotHandler {
       });
     } catch (editError) {
       console.error('编辑消息失败，尝试发送新消息:', editError);
-      
       try {
-        // 编辑失败则发送新消息并删除原消息
         await this.api.sendMessage(chatId, {
           text: fullText,
           entities: newEntities,
           media: Utils.getMediaInfo(message),
           disablePreview: config.disablePreview
         });
-        
         await this.api.deleteMessage(chatId, message.message_id);
       } catch (sendError) {
         console.error('发送新消息失败:', sendError);
@@ -1044,3 +1004,4 @@ class BotHandler {
     }
   }
 }
+
