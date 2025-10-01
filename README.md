@@ -56,11 +56,10 @@
 
 ### 第二步：设置 Cloudflare Worker
 1. 登录 Cloudflare 账户并进入 Workers 面板
-2. 创建新的 Worker 服务
+2. 创建新的 Worker 与 KV ,并在 bindings 选项卡里把 KV 注册为“pdzsConfig”
 3. 将提供的代码复制到 Worker 编辑器中
 4. 在设置中添加环境变量：
    - `BOT_TOKEN`: 你的 Telegram 机器人 API Token
-   - `pdzsConfig`: 绑定一个 KV 命名空间用于存储配置
 
 ### 第三步：配置 Webhook
 1. 获取你的 Cloudflare Worker 部署 URL
