@@ -19,15 +19,15 @@ const HELP_TEXT = `📌 /pdzs footer
 参数：填写Markdown链接文本（如"示例 (https://t.me/example)"）或"none"禁用页脚
 实例：
    - 禁用页脚：/pdzs footer none
-   - 设置页脚：/pdzs footer "\\[text1\\] (https://t.me/link) \\| text2 \\| \\[text3\\] (https://t.me/link)"
+   - 设置页脚：/pdzs footer "\[text1\] (https://t.me/link) \| text2 \| \[text3\] (https://t.me/link)"
 
 📌 /pdzs delword
 功能概括：设置需要自动屏蔽的关键词（支持正则），匹配到的内容会被删除
 参数：填写用于屏蔽的正则表达式（如" 广告 "或"spam|phishing"），或"none"清除所有屏蔽词
 实例：
-   - 屏蔽包含"广告"的词：/pdzs delword "\\b广告\\b"
+   - 屏蔽包含"广告"的词：/pdzs delword "广告"
    - 清除所有屏蔽词：/pdzs delword none
-   - 追加屏蔽词：/pdzs delword add "\\bspam\\b"
+   - 追加屏蔽词：/pdzs delword add "spam"
 
 📌 /pdzs forward
 功能概括：设置转发消息时的来源显示方式，优化转发内容的可读性
